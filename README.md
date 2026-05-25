@@ -39,6 +39,7 @@ python -m http.server 8080
 
 - `index.html` — 基础版本，简单的绘画功能
 - `full-version.html` — 完整版本，包含所有功能
+- `mediapipe/` — MediaPipe 模型和库文件（本地离线版）
 
 ## 技术栈
 
@@ -58,3 +59,4 @@ python -m http.server 8080
 1. 需要 HTTPS 或 localhost 环境才能访问摄像头
 2. 光线要充足，手要正对摄像头
 3. 建议距离摄像头 30-50cm
+4. 模型文件已打包在 `mediapipe/` 目录，可离线使用
