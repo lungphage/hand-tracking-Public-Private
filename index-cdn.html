@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Hand Drawing (CDN)</title>
+<style>
+body { background: #111; color: #fff; font-family: sans-serif; text-align: center; padding: 20px; }
+canvas { position: absolute; top: 0; left: 0; }
+#wrap { position: relative; display: inline-block; width: 640px; height: 480px; }
+#overlay { z-index: 1; transform: scaleX(-1); }
+#draw { z-index: 2; transform: scaleX(-1); }
+#info { font-size: 18px; margin: 10px; padding: 10px; background: #222; }
+.btn { padding: 10px 20px; margin: 5px; cursor: pointer; font-size: 16px; }
+.btn.active { background: #7b2ff7; color: #fff; }
+</style>
+</head>
+<body>
+
+<h1>✋ 手部追踪绘画 (CDN版)</h1>
+
+<button class="btn active" id="btn-draw" onclick="setMode('draw')">✏️ 画笔</button>
+<button class="btn" id="btn-erase" onclick="setMode('erase')">🧹 橡皮</button>
+<button class="btn" onclick="clearCanvas()">🗑️ 清空</button>
+
+<div id="info">加载中...</div>
+
+<div id="wrap">
+  <video id="v" width="640" height="480" autoplay playsinline style="transform:scaleX(-1)"></video>
+  <canvas id="overlay" width="640" height="480"></canvas>
+  <canvas id="draw" width="640" height="480"></canvas>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js"></script>
+
+<script>
+var v = document.getElementById('v');
+var overlayCanvas = document.getElementById('overlay');
+var drawCanvas = document.getElementById('draw');
+var overlayCtx = overlayCanvas.getContext('2d');
+var drawCtx = drawCanvas.getContext('2d');
+var info = document.getElementById('info');
+var count = 0;
+var isDrawing = false;
+var lastX = 0, lastY = 0;
+var mode = 'draw';
+
+function setMode(m) {
+  mode = m;
+  document.querySelectorAll('.btn').forEach(function(b) { b.classList.remove('active'); });
+  document.getElementById('btn-' + m).classList.add('active');
+}
+
+function clearCanvas() {
+  drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+}
+
+var hands = new Hands({
+  locateFile: function(f) {
+    return 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/' + f;
+  }
+});
+
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+
+hands.onResults(function(r) {
+  count++;
+  overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+  if (!r.multiHandLandmarks || r.multiHandLandmarks.length === 0) {
+    info.innerHTML = '帧:' + count + ' | ❌ 未检测到手';
+    return;
+  }
+
+  var lm = r.multiHandLandmarks[0];
+
+  var CONNS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+  drawConnectors(overlayCtx, lm, CONNS, { color: '#7b2ff7', lineWidth: 2 });
+  drawLandmarks(overlayCtx, lm, { color: '#00d2ff', lineWidth: 1, radius: 3 });
+
+  var tip = lm[8];
+  var tipX = tip.x * overlayCanvas.width;
+  var tipY = tip.y * overlayCanvas.height;
+
+  var indexUp = lm[8].y < lm[6].y;
+  var middleUp = lm[12].y < lm[10].y;
+
+  var gesture = '✊ 停止';
+  if (indexUp && middleUp) gesture = '✌️ 绘制';
+  else if (indexUp) gesture = '👆 跟踪';
+
+  info.innerHTML = '帧:' + count + ' | ' + gesture + ' | 模式:' + mode;
+
+  overlayCtx.fillStyle = '#00ff00';
+  overlayCtx.shadowColor = '#00ff00';
+  overlayCtx.shadowBlur = 15;
+  overlayCtx.beginPath();
+  overlayCtx.arc(tipX, tipY, 8, 0, Math.PI * 2);
+  overlayCtx.fill();
+  overlayCtx.shadowBlur = 0;
+
+  if (indexUp && middleUp) {
+    if (!isDrawing) {
+      isDrawing = true;
+      lastX = tipX;
+      lastY = tipY;
+    } else {
+      drawCtx.strokeStyle = mode === 'erase' ? '#111' : '#00ff00';
+      drawCtx.lineWidth = mode === 'erase' ? 20 : 3;
+      drawCtx.lineCap = 'round';
+      drawCtx.lineJoin = 'round';
+      drawCtx.beginPath();
+      drawCtx.moveTo(lastX, lastY);
+      drawCtx.lineTo(tipX, tipY);
+      drawCtx.stroke();
+      lastX = tipX;
+      lastY = tipY;
+    }
+  } else {
+    isDrawing = false;
+  }
+});
+
+var cam = new Camera(v, {
+  onFrame: async function() {
+    await hands.send({ image: v });
+  },
+  width: 640,
+  height: 480
+});
+
+cam.start().then(function() {
+  info.innerHTML = '📷 摄像头就绪！伸出 ✌️ 手势开始画画';
+}).catch(function(e) {
+  info.innerHTML = '❌ 摄像头错误: ' + e.message;
+});
+</script>
+</body>
+</html>

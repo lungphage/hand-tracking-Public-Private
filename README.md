@@ -37,9 +37,14 @@ python -m http.server 8080
 
 ### 文件说明
 
+**本地离线版（无需联网）：**
 - `index.html` — 基础版本，简单的绘画功能
 - `full-version.html` — 完整版本，包含所有功能
-- `mediapipe/` — MediaPipe 模型和库文件（本地离线版）
+- `mediapipe/` — MediaPipe 模型和库文件
+
+**CDN 在线版（需要联网）：**
+- `index-cdn.html` — 基础版本，从 CDN 加载模型
+- `full-version-cdn.html` — 完整版本，从 CDN 加载模型
 
 ## 技术栈
 
