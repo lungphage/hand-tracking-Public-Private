@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hand Tracking</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0f0f23;
+  font-family: sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  color: #e0e0e0;
+  padding: 15px;
+}
+h1 { font-size: 1.3rem; color: #00d2ff; margin-bottom: 12px; }
+.controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  z-index: 100;
+  position: relative;
+}
+.btn {
+  padding: 8px 16px;
+  border: 2px solid transparent;
+  border-radius: 20px;
+  background: rgba(255,255,255,0.1);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn:hover { background: rgba(255,255,255,0.2); }
+.btn.active { background: #7b2ff7; border-color: #00d2ff; }
+.container {
+  position: relative;
+  width: 640px;
+  max-width: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 2px solid rgba(0,210,255,0.3);
+}
+#webcam { width: 100%; display: block; transform: scaleX(-1); }
+#overlay {
+  position: absolute; top: 0; left: 0;
+  width: 100%; height: 100%;
+  transform: scaleX(-1);
+  pointer-events: none;
+}
+#drawCanvas {
+  position: absolute; top: 0; left: 0;
+  width: 100%; height: 100%;
+  transform: scaleX(-1);
+  pointer-events: none;
+}
+.status {
+  margin-top: 10px;
+  padding: 10px 20px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 15px;
+  font-size: 14px;
+}
+.log {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: rgba(0,0,0,0.4);
+  border-radius: 8px;
+  font-size: 11px;
+  font-family: monospace;
+  color: #666;
+  max-width: 640px;
+  width: 100%;
+  max-height: 100px;
+  overflow-y: auto;
+}
+</style>
+</head>
+<body>
+
+<h1>✋ 指尖写字 & 选框</h1>
+
+<div class="controls">
+  <button class="btn active" id="btn-draw">✏️ 写字</button>
+  <button class="btn" id="btn-select">⬚ 选框</button>
+  <button class="btn" id="btn-erase">🧹 橡皮</button>
+  <button class="btn" id="btn-clear">🗑️ 清空</button>
+  <button class="btn" id="btn-undo">↩️ 撤销</button>
+  <input type="color" id="colorPicker" value="#00ff88" style="width:32px;height:32px;border:none;border-radius:50%;cursor:pointer;">
+  <input type="range" id="lineWidth" min="1" max="20" value="4" style="width:70px;">
+</div>
+
+<div class="container">
+  <video id="webcam" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+  <canvas id="drawCanvas"></canvas>
+</div>
+
+<div class="status" id="status">⏳ 加载中...</div>
+<div class="log" id="log"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js"></script>
+
+<script>
+(function() {
+  var logEl = document.getElementById('log');
+  var statusEl = document.getElementById('status');
+  var video = document.getElementById('webcam');
+  var overlayCanvas = document.getElementById('overlay');
+  var drawCanvas = document.getElementById('drawCanvas');
+  var overlayCtx = overlayCanvas.getContext('2d');
+  var drawCtx = drawCanvas.getContext('2d');
+
+  var mode = 'draw';
+  var drawing = false;
+  var lastPt = null;
+  var smoothPt = null;
+  var paths = [];
+  var curPath = [];
+  var selStart = null;
+  var selEnd = null;
+  var openStart = null;
+  var frameCount = 0;
+  var detectCount = 0;
+
+  function log(msg) {
+    var line = document.createElement('div');
+    line.textContent = msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    console.log('[Hand]', msg);
+  }
+
+  // 按钮事件
+  document.getElementById('btn-draw').onclick = function() { setMode('draw'); };
+  document.getElementById('btn-select').onclick = function() { setMode('select'); };
+  document.getElementById('btn-erase').onclick = function() { setMode('erase'); };
+  document.getElementById('btn-clear').onclick = function() { clearAll(); };
+  document.getElementById('btn-undo').onclick = function() { undoLast(); };
+
+  function setMode(m) {
+    mode = m;
+    document.querySelectorAll('.btn').forEach(function(b) { b.classList.remove('active'); });
+    document.getElementById('btn-' + m).classList.add('active');
+  }
+
+  function clearAll() {
+    paths = []; curPath = []; selStart = null; selEnd = null;
+    drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  }
+
+  function undoLast() {
+    if (paths.length) { paths.pop(); redraw(); }
+  }
+
+  function redraw() {
+    drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+    for (var i = 0; i < paths.length; i++) {
+      var p = paths[i];
+      if (p.pts.length < 2) continue;
+      drawCtx.beginPath();
+      drawCtx.strokeStyle = p.color;
+      drawCtx.lineWidth = p.width;
+      drawCtx.lineCap = 'round';
+      drawCtx.lineJoin = 'round';
+      drawCtx.moveTo(p.pts[0].x, p.pts[0].y);
+      for (var j = 1; j < p.pts.length; j++) drawCtx.lineTo(p.pts[j].x, p.pts[j].y);
+      drawCtx.stroke();
+    }
+    if (selStart && selEnd) drawSel();
+  }
+
+  function smooth(p) {
+    if (!smoothPt) smoothPt = { x: p.x, y: p.y };
+    else { smoothPt.x += (p.x - smoothPt.x) * 0.4; smoothPt.y += (p.y - smoothPt.y) * 0.4; }
+    return { x: smoothPt.x, y: smoothPt.y };
+  }
+
+  function detectGesture(lm) {
+    // MediaPipe landmarks: 0=wrist, 8=index_tip, 12=middle_tip, 16=ring_tip, 20=pinky_tip
+    // 6=index_pip, 10=middle_pip, 14=ring_pip, 18=pinky_pip
+    var indexUp = lm[8].y < lm[6].y;
+    var middleUp = lm[12].y < lm[10].y;
+    var ringUp = lm[16].y < lm[14].y;
+    var pinkyUp = lm[20].y < lm[18].y;
+
+    if (indexUp && middleUp && ringUp && pinkyUp) return 'open';
+    if (indexUp && middleUp && !ringUp && !pinkyUp) return 'peace';
+    if (indexUp && !middleUp && !ringUp && !pinkyUp) return 'point';
+    return 'fist';
+  }
+
+  function startDraw(p) {
+    drawing = true;
+    lastPt = p;
+    curPath = [{ x: p.x, y: p.y }];
+  }
+
+  function continueDraw(p) {
+    if (!drawing || !lastPt) return;
+    var color = mode === 'erase' ? '#0f0f23' : document.getElementById('colorPicker').value;
+    var lw = mode === 'erase' ? 20 : parseInt(document.getElementById('lineWidth').value);
+    drawCtx.beginPath();
+    drawCtx.strokeStyle = color;
+    drawCtx.lineWidth = lw;
+    drawCtx.lineCap = 'round';
+    drawCtx.moveTo(lastPt.x, lastPt.y);
+    drawCtx.lineTo(p.x, p.y);
+    drawCtx.stroke();
+    curPath.push({ x: p.x, y: p.y });
+    lastPt = p;
+  }
+
+  function stopDraw() {
+    if (drawing && curPath.length > 1) {
+      paths.push({
+        pts: curPath.slice(),
+        color: mode === 'erase' ? '#0f0f23' : document.getElementById('colorPicker').value,
+        width: mode === 'erase' ? 20 : parseInt(document.getElementById('lineWidth').value)
+      });
+    }
+    drawing = false;
+    lastPt = null;
+    curPath = [];
+    if (mode !== 'select') { selStart = null; selEnd = null; }
+  }
+
+  function drawSel() {
+    if (!selStart || !selEnd) return;
+    var x = Math.min(selStart.x, selEnd.x);
+    var y = Math.min(selStart.y, selEnd.y);
+    var w = Math.abs(selEnd.x - selStart.x);
+    var h = Math.abs(selEnd.y - selStart.y);
+
+    // 画在 overlay 上（因为有镜像，文字需要反转）
+    overlayCtx.strokeStyle = '#00d2ff';
+    overlayCtx.lineWidth = 2;
+    overlayCtx.setLineDash([10, 5]);
+    overlayCtx.strokeRect(x, y, w, h);
+    overlayCtx.setLineDash([]);
+    overlayCtx.fillStyle = 'rgba(0,210,255,0.1)';
+    overlayCtx.fillRect(x, y, w, h);
+
+    // 文字反转回来，使其可读
+    overlayCtx.save();
+    overlayCtx.scale(-1, 1);
+    overlayCtx.fillStyle = '#00d2ff';
+    overlayCtx.font = '14px monospace';
+    overlayCtx.fillText(Math.round(w) + ' x ' + Math.round(h), -(x + w - 4), y - 6);
+    overlayCtx.restore();
+  }
+
+  function init() {
+    log('初始化 Hands...');
+
+    var hands = new Hands({
+      locateFile: function(f) {
+        log('加载: ' + f);
+        return 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/' + f;
+      }
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(function(r) {
+      frameCount++;
+      var w = overlayCanvas.offsetWidth;
+      var h = overlayCanvas.offsetHeight;
+
+      // 保存绘画内容
+      var imgData = drawCtx.getImageData(0, 0, drawCanvas.width, drawCanvas.height);
+
+      overlayCanvas.width = w;
+      overlayCanvas.height = h;
+      drawCanvas.width = w;
+      drawCanvas.height = h;
+
+      // 恢复绘画内容
+      drawCtx.putImageData(imgData, 0, 0);
+
+      // 只清空 overlay，不清空 draw
+      overlayCtx.clearRect(0, 0, w, h);
+
+      if (!r.multiHandLandmarks || !r.multiHandLandmarks.length) {
+        statusEl.textContent = '❌ 未检测到手 (帧:' + frameCount + ')';
+        stopDraw();
+        return;
+      }
+
+      detectCount++;
+      var CONNS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+
+      // 画所有手的骨架
+      for (var hi = 0; hi < r.multiHandLandmarks.length; hi++) {
+        var lm = r.multiHandLandmarks[hi];
+        drawConnectors(overlayCtx, lm, CONNS, { color: '#7b2ff7', lineWidth: 2 });
+        drawLandmarks(overlayCtx, lm, { color: '#00d2ff', lineWidth: 1, radius: 3 });
+      }
+
+      // 双手选框模式
+      if (mode === 'select' && r.multiHandLandmarks.length >= 2) {
+        var lm1 = r.multiHandLandmarks[0];
+        var lm2 = r.multiHandLandmarks[1];
+        var tip1 = lm1[8]; // 左手食指尖
+        var tip2 = lm2[8]; // 右手食指尖
+
+        // 画两个绿色光标
+        overlayCtx.fillStyle = '#00ff88';
+        overlayCtx.shadowColor = '#00ff88';
+        overlayCtx.shadowBlur = 15;
+        overlayCtx.beginPath();
+        overlayCtx.arc(tip1.x * w, tip1.y * h, 8, 0, Math.PI * 2);
+        overlayCtx.fill();
+        overlayCtx.beginPath();
+        overlayCtx.arc(tip2.x * w, tip2.y * h, 8, 0, Math.PI * 2);
+        overlayCtx.fill();
+        overlayCtx.shadowBlur = 0;
+
+        // 用两个食指作为选框对角
+        selStart = { x: tip1.x * w, y: tip1.y * h };
+        selEnd = { x: tip2.x * w, y: tip2.y * h };
+        drawSel();
+
+        statusEl.textContent = '✅ 双手选框 | 帧:' + frameCount;
+        return;
+      }
+
+      // 单手模式
+      var lm = r.multiHandLandmarks[0];
+      var tip = lm[8];
+      overlayCtx.fillStyle = '#00ff88';
+      overlayCtx.shadowColor = '#00ff88';
+      overlayCtx.shadowBlur = 15;
+      overlayCtx.beginPath();
+      overlayCtx.arc(tip.x * w, tip.y * h, 8, 0, Math.PI * 2);
+      overlayCtx.fill();
+      overlayCtx.shadowBlur = 0;
+
+      var pt = smooth({ x: tip.x * w, y: tip.y * h });
+      var g = detectGesture(lm);
+
+      statusEl.textContent = '✅ 手势:' + g + ' 帧:' + frameCount + ' 检测:' + detectCount;
+
+      if (g === 'open') {
+        if (!openStart) openStart = Date.now();
+        if (Date.now() - openStart > 2000) { clearAll(); openStart = null; }
+        stopDraw();
+      } else {
+        openStart = null;
+      }
+
+      if (g === 'peace') {
+        if (mode === 'select') {
+          // 单手选框：食指拖拽
+          if (!selStart) selStart = { x: pt.x, y: pt.y };
+          selEnd = { x: pt.x, y: pt.y };
+          drawSel();
+        } else {
+          if (!drawing) startDraw(pt);
+          else continueDraw(pt);
+        }
+      } else {
+        stopDraw();
+      }
+    });
+
+    log('启动摄像头...');
+    var cam = new Camera(video, {
+      onFrame: async function() {
+        await hands.send({ image: video });
+      },
+      width: 640,
+      height: 480
+    });
+
+    cam.start().then(function() {
+      log('摄像头就绪!');
+      statusEl.textContent = '📷 请把手放在摄像头前';
+    }).catch(function(e) {
+      log('摄像头错误: ' + e.message);
+    });
+  }
+
+  window.addEventListener('load', function() {
+    log('页面加载完成');
+    setTimeout(init, 100);
+  });
+})();
+</script>
+</body>
+</html>
